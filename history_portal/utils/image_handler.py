@@ -7,15 +7,18 @@ This module is responsible for:
 - Saving images locally
 """
 
-import requests
-import json
 import os
+import shutil
+import requests
+import base64
+from io import BytesIO
+import json
 import csv
 from datetime import datetime, timedelta
 import time
-import base64
-import shutil
 from urllib.parse import urlparse
+from dotenv import load_dotenv
+from PIL import Image
 
 class ImageHandler:
     """
@@ -24,23 +27,79 @@ class ImageHandler:
     
     def __init__(self):
         """Initialize image handling."""
-        self.api_key = "AIzaSyCubrsaD3iWCn2DBmc5IUI9gY-dL2BsGAs"
-        self.search_engine_id = "76870cfb35dbb443a"  # Google Custom Search Engine ID
+        # Load environment variables
+        load_dotenv()
+        self.api_key = os.getenv('GOOGLE_API_KEY')
+        self.search_engine_id = os.getenv('SEARCH_ENGINE_ID')
+        
+        if not self.api_key or not self.search_engine_id:
+            raise ValueError("API credentials not found in environment variables")
+            
         self.project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self.cache_dir = os.path.join(self.project_root, "cache", "images")
         self.csv_cache = os.path.join(self.cache_dir, "image_cache.csv")
         self.images_dir = os.path.join(self.cache_dir, "downloaded")
-        self.api_calls_today = 0
-        self.max_api_calls = 45
-        self.image_counter = 1
+        
+        # Initialize API counter
+        self.api_calls_file = os.path.join(self.project_root, 'cache', 'api_counter.json')
+        self.load_api_counter()
         
         # Create necessary directories
         os.makedirs(self.cache_dir, exist_ok=True)
         os.makedirs(self.images_dir, exist_ok=True)
         
         # Clean up old images
-        self._cleanup_old_images()
+        self.cleanup_images()
         self._init_csv_cache()
+        
+    def load_api_counter(self):
+        """Load API counter from file or initialize if not exists."""
+        try:
+            if os.path.exists(self.api_calls_file):
+                with open(self.api_calls_file, 'r') as f:
+                    data = json.load(f)
+                    last_reset = datetime.fromisoformat(data['last_reset'])
+                    # Reset counter if it's a new day
+                    if last_reset.date() < datetime.now().date():
+                        self.api_calls_left = 95
+                        self.save_api_counter()
+                    else:
+                        self.api_calls_left = data['calls_left']
+            else:
+                self.api_calls_left = 95
+                self.save_api_counter()
+        except Exception as e:
+            print(f"Error loading API counter: {e}")
+            self.api_calls_left = 95
+            self.save_api_counter()
+            
+    def save_api_counter(self):
+        """Save API counter to file."""
+        try:
+            os.makedirs(os.path.dirname(self.api_calls_file), exist_ok=True)
+            with open(self.api_calls_file, 'w') as f:
+                json.dump({
+                    'last_reset': datetime.now().isoformat(),
+                    'calls_left': self.api_calls_left
+                }, f)
+        except Exception as e:
+            print(f"Error saving API counter: {e}")
+            
+    def get_api_calls_left(self):
+        """Get number of API calls left."""
+        return self.api_calls_left
+        
+    def decrease_api_counter(self):
+        """Decrease API counter and save."""
+        if self.api_calls_left > 0:
+            self.api_calls_left -= 1
+            self.save_api_counter()
+        
+    def cleanup_images(self):
+        """Delete all images from previous session."""
+        if os.path.exists(self.images_dir):
+            shutil.rmtree(self.images_dir)
+        os.makedirs(self.images_dir, exist_ok=True)
         
     def _init_csv_cache(self):
         """Initialize CSV cache file if it doesn't exist."""
@@ -65,9 +124,9 @@ class ImageHandler:
         path = parsed.path.lower()
         return path.endswith('.png')
         
-    def _download_png(self, url):
+    def _download_image(self, url):
         """
-        Download PNG image from URL.
+        Download image from URL.
         
         Args:
             url (str): Image URL
@@ -79,7 +138,7 @@ class ImageHandler:
             response = requests.get(url, stream=True)
             if response.status_code == 200:
                 # Generate unique filename
-                filename = f"image_{int(time.time())}_{self.image_counter}.png"
+                filename = f"image_{int(time.time())}_{self.api_calls_left}.png"
                 filepath = os.path.join(self.images_dir, filename)
                 
                 # Save the image
@@ -87,11 +146,10 @@ class ImageHandler:
                     response.raw.decode_content = True
                     shutil.copyfileobj(response.raw, f)
                     
-                self.image_counter += 1
                 return filepath
             return None
         except Exception as e:
-            print(f"Error downloading PNG: {e}")
+            print(f"Error downloading image: {e}")
             return None
             
     def get_image_url(self, query):
@@ -104,16 +162,17 @@ class ImageHandler:
         Returns:
             tuple: (URL of the first PNG image, local path) or (None, None) if not found
         """
-        if self.api_calls_today >= self.max_api_calls:
-            print("API call limit reached for today")
+        # Check API limit
+        if self.api_calls_left <= 0:
+            print("API limit reached for today")
             return None, None
             
         # Check cache first
-        cached_result = self._get_cached_url(query)
-        if cached_result:
-            return cached_result
+        cached_url = self._get_cached_url(query)
+        if cached_url:
+            return cached_url
             
-        # Construct the search URL
+        # Prepare search query
         search_url = "https://www.googleapis.com/customsearch/v1"
         params = {
             'key': self.api_key,
@@ -125,61 +184,61 @@ class ImageHandler:
         }
         
         try:
+            # Make API request
             response = requests.get(search_url, params=params)
-            self.api_calls_today += 1
             
             if response.status_code == 200:
+                # Decrease API counter only after successful request
+                self.decrease_api_counter()
+                
                 data = response.json()
                 if 'items' in data:
                     # Look for first PNG URL
                     for item in data['items']:
                         url = item['link']
-                        if self._is_png_url(url):
-                            # Download the PNG file
-                            local_path = self._download_png(url)
+                        if url.lower().endswith('.png'):
+                            # Download and save image
+                            local_path = self._download_image(url)
                             if local_path:
+                                # Cache the result
                                 self._cache_url(query, url, local_path)
                                 return url, local_path
-            return None, None
+                return None, None
         except Exception as e:
-            print(f"Error fetching image URL: {e}")
+            print(f"Error in get_image_url: {e}")
             return None, None
             
     def get_image_base64(self, query):
-        """
-        Get image as base64 string.
-        
-        Args:
-            query (str): Search query
-            
-        Returns:
-            str: Base64 encoded image or None if not found
-        """
-        image_url, local_path = self.get_image_url(query)
-        if not local_path:
-            return None
-            
+        """Get base64-encoded image for the query."""
         try:
-            with open(local_path, 'rb') as f:
-                image_data = base64.b64encode(f.read()).decode('utf-8')
-                return image_data
+            # Try to get image URL from Google Custom Search API
+            image_url, local_path = self.get_image_url(query)
+            if not image_url:
+                return None
+                
+            # Download image
+            response = requests.get(image_url)
+            if response.status_code != 200:
+                return None
+                
+            # Return raw PNG data
+            return base64.b64encode(response.content).decode('utf-8')
+                
         except Exception as e:
-            print(f"Error encoding image to base64: {e}")
+            print(f"Error getting image: {e}")
             return None
             
     def _get_cached_url(self, query):
-        """Get cached URL and local path for query if it exists and is not too old."""
+        """Get cached URL for query if exists and not expired."""
         if not os.path.exists(self.csv_cache):
             return None
-            
-        with open(self.csv_cache, 'r', encoding='utf-8') as f:
-            reader = csv.DictReader(f)
+        
+        with open(self.csv_cache, 'r', newline='', encoding='utf-8') as f:
+            reader = csv.reader(f)
             for row in reader:
-                if row['query'] == query:
-                    timestamp = datetime.fromisoformat(row['timestamp'])
-                    if datetime.now() - timestamp < timedelta(days=7):
-                        if os.path.exists(row['local_path']):
-                            return row['url'], row['local_path']
+                if len(row) >= 4 and row[0] == query:
+                    # Don't decrease counter for cached results
+                    return row[1], row[3]
         return None
         
     def _cache_url(self, query, url, local_path):
@@ -187,7 +246,3 @@ class ImageHandler:
         with open(self.csv_cache, 'a', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             writer.writerow([query, url, datetime.now().isoformat(), local_path])
-            
-    def get_api_calls_left(self):
-        """Get number of API calls left for today."""
-        return self.max_api_calls - self.api_calls_today

@@ -26,12 +26,12 @@ class APIHandler:
     
     def __init__(self):
         """Inicjalizacja obsługi API z domyślnym trybem online."""
-        self.online_mode = True
+        self.online_mode = self.check_internet()  # Check internet at startup
         self.csv_handler = CSVHandler()
         
     def check_internet(self, host="8.8.8.8", port=53, timeout=3):
         """
-        Sprawdzenie połączenia internetowego.
+        Sprawdzenie połączenia z internetem poprzez ping Google DNS.
         
         Args:
             host (str): Host do sprawdzenia (domyślnie Google DNS)
@@ -44,10 +44,10 @@ class APIHandler:
         try:
             socket.setdefaulttimeout(timeout)
             socket.socket(socket.AF_INET, socket.SOCK_STREAM).connect((host, port))
-            self.online_mode = True
+            print("Internet connection: Available")
             return True
-        except socket.error:
-            self.online_mode = False
+        except socket.error as ex:
+            print("Internet connection: Not available")
             return False
             
     def get_events_by_date(self, month, day):

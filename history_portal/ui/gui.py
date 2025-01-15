@@ -2,17 +2,22 @@
 Graphical user interface module for the history portal.
 """
 
-import customtkinter as ctk
 import tkinter as tk
+from tkinter import ttk
 from tkinter import messagebox
 import base64
 from io import BytesIO
+import os
+from PIL import Image, ImageTk
+import threading
+import webbrowser
+import time
+import urllib.parse
+
 from utils.api_handler import APIHandler
 from utils.image_handler import ImageHandler
 import socket
-import webbrowser
-import threading
-import time
+import customtkinter as ctk
 
 class LoadingAnimation(tk.Canvas):
     def __init__(self, parent, width, height, *args, **kwargs):
@@ -102,23 +107,30 @@ class HistoryPortalGUI:
         
     def create_left_panel(self):
         """Create the left panel with image display."""
-        # Image label
-        self.image_label = tk.Label(self.left_frame, bg="#2b2b2b", fg="white")
-        self.image_label.pack(expand=True, fill="both", padx=10, pady=10)
+        # Use specific color that matches CustomTkinter dark theme
+        bg_color = "#2B2B2B"
         
-        # Loading animation below image
-        self.loading_animation = LoadingAnimation(
+        # Create canvas with matching background
+        self.image_canvas = tk.Canvas(
             self.left_frame,
-            width=int(self.window.winfo_screenwidth() * 0.4),
-            height=4
+            bg=bg_color,
+            highlightthickness=0
         )
-        self.loading_animation.pack(fill="x", padx=10, pady=(0, 10))
+        self.image_canvas.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Loading label with matching colors
+        self.loading_label = tk.Label(
+            self.image_canvas,
+            text="Loading...",
+            fg="#DCE4EE",  # Light text color
+            bg=bg_color
+        )
         
     def create_right_panel(self):
         """Create the right panel with controls and text display."""
         # Input fields frame
         input_frame = ctk.CTkFrame(self.right_frame)
-        input_frame.pack(fill="x", padx=10, pady=10)
+        input_frame.pack(fill=tk.X, padx=10, pady=10)
         
         # Day input
         self.day_label = ctk.CTkLabel(input_frame, text="Day:")
@@ -132,74 +144,92 @@ class HistoryPortalGUI:
         self.month_entry = ctk.CTkEntry(input_frame, width=60)
         self.month_entry.grid(row=0, column=3, padx=5, pady=5)
         
-        # Buttons frame
-        button_frame = ctk.CTkFrame(self.right_frame)
-        button_frame.pack(fill="x", padx=10, pady=(0, 10))
+        # Create frame for buttons
+        self.button_frame = ctk.CTkFrame(self.right_frame)
+        self.button_frame.pack(fill=tk.X, padx=5, pady=5)
         
         # Control buttons
         self.find_button = ctk.CTkButton(
-            button_frame,
+            self.button_frame,
             text="Find Event",
             command=self.find_events
         )
-        self.find_button.pack(fill="x", padx=5, pady=2)
-        
-        self.random_button = ctk.CTkButton(
-            button_frame,
-            text="Random Event",
-            command=self.random_date
-        )
-        self.random_button.pack(fill="x", padx=5, pady=2)
+        self.find_button.pack(side=tk.LEFT, padx=5)
         
         self.next_button = ctk.CTkButton(
-            button_frame,
-            text="Next Event",
+            self.button_frame,
+            text="Next",
             command=self.next_event
         )
-        self.next_button.pack(fill="x", padx=5, pady=2)
+        self.next_button.pack(side=tk.LEFT, padx=5)
+        
+        self.random_button = ctk.CTkButton(
+            self.button_frame,
+            text="Random",
+            command=self.random_date
+        )
+        self.random_button.pack(side=tk.LEFT, padx=5)
         
         # Online mode frame
         mode_frame = ctk.CTkFrame(self.right_frame)
-        mode_frame.pack(fill="x", padx=10, pady=(0, 10))
+        mode_frame.pack(fill=tk.X, padx=5, pady=5)
         
         # Online mode switch
         self.online_switch = ctk.CTkSwitch(
             mode_frame,
             text="Online Mode",
-            command=self.toggle_online_mode,
-            onvalue=True,
-            offvalue=False
+            command=self.toggle_online_mode
         )
-        self.online_switch.pack(pady=5)
-        self.online_switch.select()
+        self.online_switch.pack(side=tk.LEFT, padx=5)
+        self.online_switch.select()  # Enable by default
         
-        # API calls counter
-        self.api_calls_label = ctk.CTkLabel(
+        # API counter label
+        self.api_counter_label = ctk.CTkLabel(
             mode_frame,
-            text=f"API Calls Left Today: {self.api_calls_left}"
+            text="API Calls: 95/95",
+            font=("Arial", 12)
         )
-        self.api_calls_label.pack(pady=5)
+        self.api_counter_label.pack(side=tk.RIGHT, padx=5)
         
-        # Event text display
+        # Create text widget for event display
         self.event_text = ctk.CTkTextbox(
             self.right_frame,
-            height=400,
-            wrap="word"
+            height=200,
+            font=("Arial", 12)
         )
-        self.event_text.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self.event_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
         # Read more button at the bottom
         self.read_more_button = ctk.CTkButton(
             self.right_frame,
             text="Read More",
-            command=self.open_wiki
+            command=self.open_in_google
         )
-        self.read_more_button.pack(fill="x", padx=10, pady=(0, 10))
+        self.read_more_button.pack(fill=tk.X, padx=5, pady=5)
         
     def toggle_online_mode(self):
         """Toggle between online and offline modes."""
         self.is_online = self.online_switch.get()
         
+        # Clear canvas when switching modes
+        self.image_canvas.delete("all")
+        
+        # Update current event display if exists
+        if hasattr(self, 'current_event'):
+            self.display_event(self.current_event)
+        
+        # Update API counter display
+        if self.is_online:
+            api_calls_left = self.image_handler.get_api_calls_left()
+            self.api_counter_label.configure(text=f"API Calls: {api_calls_left}/95")
+            if api_calls_left <= 10:
+                self.api_counter_label.configure(
+                    text=f"Warning: only {api_calls_left} API calls left!",
+                    text_color="red"
+                )
+        else:
+            self.api_counter_label.configure(text="Offline Mode", text_color="white")
+            
     def find_events(self):
         """Find historical events for the given date."""
         try:
@@ -219,77 +249,127 @@ class HistoryPortalGUI:
             messagebox.showerror("Error", "Please enter valid day and month")
             
     def display_event(self, event):
-        """Display the event and its related image."""
+        """Display the event in the text widget."""
         if not event:
             return
-            
-        # Display event text
+        
+        self.current_event = event
+        
+        # Enable text widget for editing
+        self.event_text.configure(state="normal")
+        
+        # Clear previous content
         self.event_text.delete("1.0", tk.END)
-        self.event_text.insert("1.0", f"Year: {event['year']}\n\n{event['text']}")
+        
+        # Add event text
+        year_text = f"{event['year']} - "
+        description = event['text']
+        
+        self.event_text.insert(tk.END, year_text, "year")
+        self.event_text.insert(tk.END, description)
+        
+        # Disable text widget
+        self.event_text.configure(state="disabled")
         
         # Display related image
         if self.is_online:
-            # Create search query from event
-            query = f"{event['text']} {event['year']} historical event"
-            self.display_image(query)
+            self.loading_label.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
+            self.window.update()
             
+            # Create search query from event
+            query = f"{event['year']} {event['text']}"
+            
+            # Get and display image
+            image_data = self.image_handler.get_image_base64(query)
+            self.display_image(image_data)
+            
+    def _load_image_async(self, query):
+        """Load and display image asynchronously."""
+        try:
+            image_data = self.image_handler.get_image_base64(query)
+            
+            # Schedule image display on main thread
+            self.window.after(0, lambda: self._display_image_main_thread(image_data))
+        except Exception as e:
+            print(f"Error loading image: {e}")
+            self.window.after(0, self.enable_buttons)
+
+    def _display_image_main_thread(self, image_data):
+        """Display image on main thread and update UI state."""
+        try:
+            self.display_image(image_data)
+        finally:
+            self.enable_buttons()
             # Update API calls counter
             self.api_calls_left = self.image_handler.get_api_calls_left()
-            self.api_calls_label.configure(
-                text=f"API Calls Left Today: {self.api_calls_left}"
+            self.api_counter_label.configure(
+                text=f"API Calls: {self.api_calls_left}/95"
             )
-            
-    def display_image(self, query):
-        """Display image for the given query."""
-        try:
-            if not self.is_online:
-                self.image_label.configure(text="Images not available in offline mode")
-                return
-                
-            self.start_loading_animation()
-            
-            def load_image():
-                try:
-                    image_data = self.image_handler.get_image_base64(query)
-                    if not image_data:
-                        self.window.after(0, lambda: self.image_label.configure(text="No image found"))
-                        return
-                        
-                    image = tk.PhotoImage(data=image_data)
-                    self.window.after(0, lambda: self.update_image_label(image))
-                    
-                except Exception as e:
-                    print(f"Error displaying image: {e}")
-                    self.window.after(0, lambda: self.image_label.configure(text="Error displaying image"))
-                finally:
-                    self.window.after(0, self.stop_loading_animation)
-                    
-            threading.Thread(target=load_image, daemon=True).start()
-            
-        except Exception as e:
-            print(f"Error in display_image: {e}")
-            self.stop_loading_animation()
-            self.image_label.configure(text="Error displaying image")
-            
-    def update_image_label(self, photo):
-        """Update image label with new photo."""
-        self.current_image = photo
-        self.image_label.configure(image=photo)
-        
-    def start_loading_animation(self):
-        """Start loading animation and disable buttons."""
+
+    def disable_buttons(self):
+        """Disable all interactive buttons."""
         self.find_button.configure(state="disabled")
         self.random_button.configure(state="disabled")
-        self.next_button.configure(state="disabled")
-        self.loading_animation.start()
         
-    def stop_loading_animation(self):
-        """Stop loading animation and enable buttons."""
+    def enable_buttons(self):
+        """Enable all interactive buttons."""
         self.find_button.configure(state="normal")
         self.random_button.configure(state="normal")
-        self.next_button.configure(state="normal")
-        self.loading_animation.stop()
+
+    def display_image(self, image_data):
+        """Display image for the given query."""
+        if not image_data:
+            # Clear previous image
+            self.image_canvas.delete("all")
+            
+            # If no API calls left, show message
+            if self.image_handler.get_api_calls_left() <= 0:
+                self.image_canvas.create_text(
+                    self.image_canvas.winfo_width() // 2,
+                    self.image_canvas.winfo_height() // 2,
+                    text="API limit reached for today\nPlease try again tomorrow",
+                    fill="#DCE4EE",
+                    font=("Arial", 14),
+                    justify=tk.CENTER
+                )
+                return
+            
+            self.loading_label.configure(text="No image found")
+            return
         
+        try:
+            # Clear previous image
+            self.image_canvas.delete("all")
+            
+            # Create PhotoImage directly from base64 data
+            photo = tk.PhotoImage(data=image_data)
+            
+            # Create image on canvas and center it
+            self.image_canvas.create_image(
+                self.image_canvas.winfo_width() // 2,
+                self.image_canvas.winfo_height() // 2,
+                image=photo,
+                anchor=tk.CENTER
+            )
+            
+            # Keep reference to prevent garbage collection
+            self.image_canvas.image = photo
+            
+            # Show warning if less than 10 API calls left
+            if self.image_handler.get_api_calls_left() <= 10:
+                self.api_counter_label.configure(
+                    text=f"Warning: only {self.image_handler.get_api_calls_left()} API calls left!",
+                    text_color="red"
+                )
+        
+        except Exception as e:
+            print(f"Error displaying image: {e}")
+            import traceback
+            traceback.print_exc()  # Print full error trace
+            self.loading_label.configure(text=f"Error displaying image: {str(e)}")
+        finally:
+            self.loading_label.place_forget()
+            
     def random_date(self):
         """Get events for a random date."""
         event = self.api_handler.get_random_event()
@@ -315,10 +395,42 @@ class HistoryPortalGUI:
             self.current_event = events[current_index + 1]
             self.display_event(self.current_event)
             
-    def open_wiki(self):
-        """Open Wikipedia article for the current event."""
-        if self.current_event and 'link' in self.current_event:
-            webbrowser.open(self.current_event['link'])
+    def prev_event(self):
+        """Display the previous event."""
+        if not self.current_event:
+            return
+            
+        events = self.api_handler.get_events_by_date(
+            self.current_event['month'],
+            self.current_event['day']
+        )
+        
+        if not events:
+            return
+            
+        current_index = events.index(self.current_event)
+        if current_index > 0:
+            self.current_event = events[current_index - 1]
+            self.display_event(self.current_event)
+            
+    def open_in_google(self):
+        """Open current event in Google search."""
+        if hasattr(self, 'current_event'):
+            # Get year and description
+            year = self.current_event['year']
+            description = self.current_event['text']
+            
+            # Create search query
+            query = f"{year} {description}"
+            
+            # URL encode the query
+            encoded_query = urllib.parse.quote(query)
+            
+            # Create Google search URL
+            url = f"https://www.google.com/search?q={encoded_query}"
+            
+            # Open in default browser
+            webbrowser.open(url)
             
     def check_internet_connection(self):
         """Check if internet connection is available."""
